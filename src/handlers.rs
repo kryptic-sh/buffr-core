@@ -813,9 +813,11 @@ wrap_display_handler! {
             // `type_.get_raw()` is `u32` on Linux but `i32` on Windows
             // (Chromium enum repr matches the platform's default `int`).
             // Cast to u32 so the embedder gets a stable type to mux on.
+            // On Linux this is a no-op cast — silence clippy.
             let browser_id = browser.map(|b| b.identifier()).unwrap_or(-1);
-            self.cursor_state
-                .store(browser_id, type_.get_raw() as u32);
+            #[allow(clippy::unnecessary_cast)]
+            let kind_raw = type_.get_raw() as u32;
+            self.cursor_state.store(browser_id, kind_raw);
             0
         }
 
