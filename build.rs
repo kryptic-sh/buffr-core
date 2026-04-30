@@ -155,9 +155,24 @@ fn stage_runtime(lib_dir: &Path, resources_dir: &Path) -> io::Result<()> {
     }
     #[cfg(target_os = "windows")]
     {
-        let dll = lib_dir.join("libcef.dll");
-        if dll.exists() {
-            copy_into_dir(&dll, &target_dir)?;
+        // CEF on Windows ships ~7 runtime DLLs alongside libcef.dll
+        // (chrome_elf, libEGL, libGLESv2, vk_swiftshader, vulkan-1,
+        // d3dcompiler_47, ...) plus vk_swiftshader_icd.json. Copy the
+        // entire Release/ DLL+JSON set so dev runs don't hit
+        // "missing dll" loader errors and the MSI staging step has
+        // them to bundle.
+        if lib_dir.exists() {
+            for entry in fs::read_dir(lib_dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.is_file() {
+                    let name = entry.file_name();
+                    let name = name.to_string_lossy();
+                    if name.ends_with(".dll") || name.ends_with(".json") {
+                        copy_into_dir(&path, &target_dir)?;
+                    }
+                }
+            }
         }
     }
     #[cfg(target_os = "macos")]
