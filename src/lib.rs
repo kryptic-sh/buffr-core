@@ -37,7 +37,8 @@ pub mod osr;
 pub use osr::{OsrFrame, OsrViewState, PopupFrameMap, SharedOsrFrame, SharedOsrViewState};
 
 pub use app::{
-    BuffrApp, ProfilePaths, force_renderer_accessibility_enabled, set_force_renderer_accessibility,
+    BuffrApp, ProfilePaths, device_scale_factor, force_renderer_accessibility_enabled,
+    set_device_scale_factor, set_force_renderer_accessibility,
     take_scheduled_message_pump_delay_ms,
 };
 pub use crash::{CrashError, CrashReport, CrashReporter};

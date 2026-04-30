@@ -15,7 +15,7 @@
 //!   plumbing.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 
 // `wrap_app!` / `wrap_browser_process_handler!` expand to references
 // to bare `App`, `WrapApp`, `ImplApp`, `BrowserProcessHandler`, etc.
@@ -34,6 +34,32 @@ use crate::new_tab::register_buffr_scheme;
 /// per-instance fields cleanly.
 static FORCE_RENDERER_ACCESSIBILITY: AtomicBool = AtomicBool::new(false);
 static NEXT_MESSAGE_PUMP_DELAY_MS: AtomicI64 = AtomicI64::new(-1);
+
+/// Device scale factor (× 1000) for the `--force-device-scale-factor`
+/// Chromium switch. Stored ×1000 so we can preserve fractional scales
+/// (1.25, 1.5, 1.75) without floats in atomics. 0 = unset, leaving
+/// CEF to its platform default. Linux has no platform autodetect, so
+/// the host queries winit's primary-monitor scale and writes here
+/// before `cef::initialize`. Windows + macOS use system DPI directly
+/// and ignore this value.
+static DEVICE_SCALE_FACTOR_X1000: AtomicU32 = AtomicU32::new(0);
+
+/// Set the device scale factor that `on_before_command_line_processing`
+/// will pass to Chromium. Caller is responsible for invoking this
+/// before `cef::initialize` (and before the App is constructed for
+/// `cef::execute_process` in subprocesses, though Chromium also forwards
+/// the parent's switch through the helper argv automatically).
+pub fn set_device_scale_factor(scale: f32) {
+    let v = (scale * 1000.0).round().max(0.0) as u32;
+    DEVICE_SCALE_FACTOR_X1000.store(v, Ordering::SeqCst);
+}
+
+/// Read the current device scale override. Returns `None` if unset
+/// (use platform default) or `Some(scale)` for a forced value.
+pub fn device_scale_factor() -> Option<f32> {
+    let v = DEVICE_SCALE_FACTOR_X1000.load(Ordering::SeqCst);
+    (v > 0).then(|| v as f32 / 1000.0)
+}
 
 /// Toggle the renderer accessibility tree for subsequent CEF launches.
 /// Call before `BuffrApp::new()` if you want the switch picked up.
@@ -138,6 +164,23 @@ wrap_app! {
             // Toggle via `[accessibility] force_renderer_accessibility`.
             if force_renderer_accessibility_enabled() {
                 append_switch(command_line, "force-renderer-accessibility");
+            }
+            // Linux HiDPI: Chromium has no platform DPI autodetect on
+            // Linux (Wayland per-output scale, X11 Xft.dpi). Without
+            // this switch pages render at 1× on a 2× display. The
+            // host writes the winit primary-monitor scale into the
+            // static before init. Windows + macOS use the OS DPI APIs
+            // directly so we leave them alone.
+            #[cfg(target_os = "linux")]
+            if let Some(scale) = device_scale_factor()
+                && (scale - 1.0).abs() > 0.01
+            {
+                append_switch_with_value(
+                    command_line,
+                    "force-device-scale-factor",
+                    &format!("{scale}"),
+                );
+                append_switch_with_value(command_line, "high-dpi-support", "1");
             }
         }
 
