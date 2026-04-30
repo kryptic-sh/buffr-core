@@ -26,6 +26,14 @@ allow = [
   "Unicode-DFS-2016",
   "Zlib",
   "CC0-1.0",
+  # Pulled in via the CEF download tooling:
+  #   bzip2 v0.6.1 → libbz2-rs-sys v0.2.3 (license = "bzip2-1.0.6")
+  # bzip2-1.0.6 is BSD-style and used everywhere in the ecosystem.
+  "bzip2-1.0.6",
+  # webpki-roots ships the Mozilla CA cert bundle under the Linux
+  # Foundation's CDLA-Permissive-2.0. Pulled transitively via `ureq`
+  # (used by `UpdateChecker`'s GitHub releases poll).
+  "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.8
 
