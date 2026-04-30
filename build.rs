@@ -111,14 +111,18 @@ fn vendor_cef_path() -> Option<PathBuf> {
 }
 
 fn host_platform() -> &'static str {
-    if cfg!(target_os = "linux") {
+    if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
         "linux64"
+    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+        "linuxarm64"
     } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
         "macosarm64"
     } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
         "macosx64"
-    } else if cfg!(target_os = "windows") {
+    } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
         "windows64"
+    } else if cfg!(all(target_os = "windows", target_arch = "aarch64")) {
+        "windowsarm64"
     } else {
         "unknown"
     }
