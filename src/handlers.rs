@@ -796,7 +796,11 @@ wrap_display_handler! {
         fn on_cursor_change(
             &self,
             browser: Option<&mut Browser>,
-            _cursor: ::std::os::raw::c_ulong,
+            // `cef_cursor_handle_t` is platform-specific: `c_ulong` on
+            // Linux, `*mut HICON__` on Windows, `*mut __ObjCObject` on
+            // macOS. Use the cef-sys typedef directly so the impl
+            // matches the trait on every target.
+            _cursor: cef::sys::cef_cursor_handle_t,
             type_: CursorType,
             _custom_cursor_info: Option<&CursorInfo>,
         ) -> ::std::os::raw::c_int {
@@ -805,8 +809,13 @@ wrap_display_handler! {
             // custom-cursor bitmap. winit's `CursorIcon` covers everything
             // Chromium hands us. Browser id lets the apps layer route to
             // the right winit window (main tab vs popup).
+            //
+            // `type_.get_raw()` is `u32` on Linux but `i32` on Windows
+            // (Chromium enum repr matches the platform's default `int`).
+            // Cast to u32 so the embedder gets a stable type to mux on.
             let browser_id = browser.map(|b| b.identifier()).unwrap_or(-1);
-            self.cursor_state.store(browser_id, type_.get_raw());
+            self.cursor_state
+                .store(browser_id, type_.get_raw() as u32);
             0
         }
 
