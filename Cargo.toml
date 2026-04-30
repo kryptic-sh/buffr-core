@@ -35,7 +35,7 @@ buffr-downloads = "0.1"
 buffr-config = "0.1"
 buffr-zoom = "0.1"
 buffr-permissions = "0.1"
-hjkl-clipboard = "=0.3.0"
+hjkl-clipboard = "0.3"
 
 [dev-dependencies]
 tempfile = "3"
