@@ -30,7 +30,6 @@ use cef::{
     BrowserSettings, CefString, CefStringUtf16, ImplBrowser, ImplBrowserHost, ImplFrame,
     WindowInfo, browser_host_create_browser_sync,
 };
-use raw_window_handle::RawWindowHandle;
 use tracing::{info, warn};
 
 use crate::cursor::{CursorState, SharedCursorState};
@@ -53,23 +52,11 @@ use crate::{
     new_pending_popup_alloc, new_popup_close_sink, new_popup_create_sink, new_popup_queue,
 };
 
-/// Rendering mode for a [`BrowserHost`].
-///
-/// Auto-detected from the `RawWindowHandle` variant passed to
-/// [`BrowserHost::new_with_options`]:
-/// - Linux: always [`HostMode::Osr`] (Wayland softbuffer composite;
-///   X11/XWayland windowed embedding is not supported)
-/// - macOS (`AppKit(_)`) → [`HostMode::Osr`] (wgpu composite; AppKit child
-///   views cannot be layered predictably with buffr's custom chrome)
-/// - Windows (`Win32(_)`) → [`HostMode::Windowed`]
-/// - Any other handle → [`HostMode::Osr`] (safe fallback)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HostMode {
-    /// Windowed embedding via OS-native child window (Windows).
-    Windowed,
-    /// Off-screen rendering — CEF paints to a buffer we composite ourselves.
-    Osr,
-}
+// `HostMode` removed: every platform now runs OSR. CEF paints into a
+// shared bitmap, the wgpu present layer composites it under buffr's
+// chrome strips. Windows previously embedded a CEF child HWND;
+// migrated to OSR so platform behavior is uniform (cursor sync, IME
+// integration, scale-factor changes, MSI footprint).
 
 /// Monotonic tab identifier minted by [`BrowserHost`]. Distinct from
 /// CEF's `Browser::identifier()` (which can collide on close+reopen).
@@ -158,9 +145,6 @@ pub struct BrowserHost {
     active: Mutex<Option<usize>>,
     /// Monotonic [`TabId`] minter. Reset only across process restart.
     next_id: AtomicU64,
-    /// Stored on construction so `open_tab` can build new browsers
-    /// after the manager is up.
-    parent_handle: Mutex<Option<RawWindowHandle>>,
     /// Last known CEF child rect (width, height). Caller-passed via
     /// [`Self::resize`]. Used by `open_tab` to size new browsers
     /// consistently.
@@ -168,9 +152,6 @@ pub struct BrowserHost {
     /// Whether the host is in private mode. Threaded into
     /// [`TabSummary`] so chrome can mark every tab private.
     private: bool,
-    /// Rendering mode — windowed embedding or off-screen rendering.
-    /// Detected from the `RawWindowHandle` variant at construction time.
-    mode: HostMode,
     /// Shared stores — every tab's CEF client funnels into the same
     /// history / downloads / zoom rows.
     history: Arc<History>,
@@ -295,13 +276,10 @@ const CLOSED_STACK_CAP: usize = 8;
 impl BrowserHost {
     /// Create the host with a single initial tab loading `url`.
     ///
-    /// `window_handle` is the platform window the CEF browser will be
-    /// parented to. On Linux the host always uses OSR mode regardless
-    /// of the handle variant. All later tabs created via
-    /// [`Self::open_tab`] re-use this handle.
+    /// All platforms run OSR; CEF paints into a buffer the embedder
+    /// composites itself. No window handle is needed at construction.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        window_handle: RawWindowHandle,
         url: &str,
         history: Arc<History>,
         downloads: Arc<Downloads>,
@@ -317,7 +295,6 @@ impl BrowserHost {
         initial_size: (u32, u32),
     ) -> Result<Self, CoreError> {
         Self::new_with_options(
-            window_handle,
             url,
             history,
             downloads,
@@ -343,7 +320,6 @@ impl BrowserHost {
     /// `--private` CLI flag.
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_options(
-        window_handle: RawWindowHandle,
         url: &str,
         history: Arc<History>,
         downloads: Arc<Downloads>,
@@ -361,17 +337,9 @@ impl BrowserHost {
         counters: Option<Arc<UsageCounters>>,
         show_favicons: bool,
     ) -> Result<Self, CoreError> {
-        // Linux and macOS use OSR so the page and buffr's custom chrome
-        // are composited into one surface. Windows still uses native child
-        // embedding.
-        let mode = match window_handle {
-            #[cfg(target_os = "macos")]
-            RawWindowHandle::AppKit(_) => HostMode::Osr,
-            #[cfg(target_os = "windows")]
-            RawWindowHandle::Win32(_) => HostMode::Windowed,
-            _ => HostMode::Osr,
-        };
-        info!(target: "buffr_core::host", ?mode, "creating CEF browser (initial tab)");
+        // All platforms run OSR. CEF paints into a shared bitmap; the
+        // wgpu present layer composites it under buffr's chrome strips.
+        info!(target: "buffr_core::host", "creating CEF browser (initial tab) in OSR mode");
         tracing::debug!(target: "buffr_core::host", %url, "creating CEF browser (initial tab) — url");
         let (osr_w, osr_h) = initial_size;
         let osr_view = Arc::new(OsrViewState::new());
@@ -393,10 +361,8 @@ impl BrowserHost {
             tabs: Mutex::new(Vec::new()),
             active: Mutex::new(None),
             next_id: AtomicU64::new(0),
-            parent_handle: Mutex::new(Some(window_handle)),
             last_size: Mutex::new(initial_size),
             private,
-            mode,
             history,
             downloads,
             downloads_config,
@@ -460,11 +426,6 @@ impl BrowserHost {
     /// intents that `on_before_popup` re-routed.
     pub fn popup_queue(&self) -> PopupQueue {
         self.popup_queue.clone()
-    }
-
-    /// Current rendering mode (windowed embedding or OSR).
-    pub fn mode(&self) -> HostMode {
-        self.mode
     }
 
     /// Returns the cached main-frame URL of the active tab. Updated by
@@ -765,9 +726,6 @@ impl BrowserHost {
     ///
     /// No-op when the host is in `Windowed` mode (native child window routes input).
     pub fn osr_mouse_move(&self, x: i32, y: i32, modifiers: u32) {
-        if self.mode != HostMode::Osr {
-            return;
-        }
         let Ok(tabs) = self.tabs.lock() else { return };
         let active_idx = self.active.lock().ok().and_then(|g| *g);
         if let Some(idx) = active_idx
@@ -791,9 +749,6 @@ impl BrowserHost {
         click_count: i32,
         modifiers: u32,
     ) {
-        if self.mode != HostMode::Osr {
-            return;
-        }
         tracing::debug!(
             target: "buffr_core::host",
             x, y, ?button, mouse_up, click_count, modifiers,
@@ -816,9 +771,6 @@ impl BrowserHost {
     ///
     /// No-op when the host is in `Windowed` mode.
     pub fn osr_mouse_leave(&self, modifiers: u32) {
-        if self.mode != HostMode::Osr {
-            return;
-        }
         let Ok(tabs) = self.tabs.lock() else { return };
         let active_idx = self.active.lock().ok().and_then(|g| *g);
         if let Some(idx) = active_idx
@@ -842,9 +794,6 @@ impl BrowserHost {
     pub fn set_frame_rate(&self, hz: u32) {
         let hz = hz.max(1);
         self.osr_view.frame_rate_hz.store(hz, Ordering::Relaxed);
-        if self.mode != HostMode::Osr {
-            return;
-        }
         if let Ok(tabs) = self.tabs.lock() {
             for t in tabs.iter() {
                 if let Some(host) = t.browser.host() {
@@ -895,9 +844,6 @@ impl BrowserHost {
     ///
     /// No-op when the host is in `Windowed` mode.
     pub fn osr_mouse_wheel(&self, x: i32, y: i32, delta_x: i32, delta_y: i32, modifiers: u32) {
-        if self.mode != HostMode::Osr {
-            return;
-        }
         let Ok(tabs) = self.tabs.lock() else { return };
         let active_idx = self.active.lock().ok().and_then(|g| *g);
         if let Some(idx) = active_idx
@@ -913,9 +859,6 @@ impl BrowserHost {
     ///
     /// No-op when the host is in `Windowed` mode.
     pub fn osr_key_event(&self, event: cef::KeyEvent) {
-        if self.mode != HostMode::Osr {
-            return;
-        }
         let Ok(tabs) = self.tabs.lock() else { return };
         let active_idx = self.active.lock().ok().and_then(|g| *g);
         if let Some(idx) = active_idx
@@ -930,9 +873,6 @@ impl BrowserHost {
     ///
     /// No-op when the host is in `Windowed` mode.
     pub fn osr_focus(&self, focused: bool) {
-        if self.mode != HostMode::Osr {
-            return;
-        }
         let Ok(tabs) = self.tabs.lock() else { return };
         let active_idx = self.active.lock().ok().and_then(|g| *g);
         if let Some(idx) = active_idx
@@ -1099,13 +1039,6 @@ impl BrowserHost {
     }
 
     fn create_browser(&self, url: &str, background: bool) -> Result<TabId, CoreError> {
-        let handle = match self.parent_handle.lock() {
-            Ok(g) => match *g {
-                Some(h) => h,
-                None => return Err(CoreError::CreateBrowserFailed),
-            },
-            Err(_) => return Err(CoreError::CreateBrowserFailed),
-        };
         let (init_w, init_h) = match self.last_size.lock() {
             Ok(g) => *g,
             Err(_) => return Err(CoreError::CreateBrowserFailed),
@@ -1127,43 +1060,10 @@ impl BrowserHost {
             runtime_style: cef::sys::cef_runtime_style_t::CEF_RUNTIME_STYLE_ALLOY.into(),
             ..WindowInfo::default()
         };
-        match self.mode {
-            HostMode::Windowed => {
-                // Capture bounds before moving window_info into set_as_child.
-                // Named with underscore so Linux (OSR-only) doesn't warn on
-                // the dead binding; macOS/Windows arms below reference it.
-                #[allow(unused_variables)]
-                let bounds = window_info.bounds.clone();
-                match handle {
-                    #[cfg(target_os = "macos")]
-                    RawWindowHandle::AppKit(h) => {
-                        window_info = window_info.set_as_child(h.ns_view.as_ptr() as _, &bounds);
-                    }
-                    #[cfg(target_os = "windows")]
-                    RawWindowHandle::Win32(h) => {
-                        // raw_window_handle gives us `isize`; CEF's HWND is `*mut HWND__`.
-                        window_info = window_info
-                            .set_as_child(cef::sys::HWND(h.hwnd.get() as *mut _), &bounds);
-                    }
-                    other => {
-                        tracing::warn!(
-                            ?other,
-                            "windowed mode but unrecognised handle variant — \
-                                 cannot embed CEF child window"
-                        );
-                        return Err(CoreError::CreateBrowserFailed);
-                    }
-                }
-            }
-            HostMode::Osr => {
-                // Off-screen rendering: no parent_window; CEF will call the
-                // RenderHandler instead of creating a child window.
-                // windowless_rendering_enabled is set on the WindowInfo so CEF
-                // takes the OSR path. RenderHandler wiring comes in step 2.
-                window_info.windowless_rendering_enabled = 1;
-                tracing::info!("creating CEF browser in OSR mode");
-            }
-        }
+        // OSR everywhere: no parent_window, CEF calls RenderHandler
+        // instead of creating a child window. The wgpu present layer
+        // composites the OSR frame under buffr's chrome strips.
+        window_info.windowless_rendering_enabled = 1;
         tracing::info!(
             bounds_w = window_info.bounds.width,
             bounds_h = window_info.bounds.height,
@@ -1179,22 +1079,15 @@ impl BrowserHost {
         // pass through whatever rate the embedder requested via
         // `set_frame_rate` (defaults to 60; embedder typically sets
         // it to the display refresh rate). CEF clamps internally —
-        // current builds cap at 60. Has no effect in Windowed mode.
-        if self.mode == HostMode::Osr {
-            let hz = self.osr_view.frame_rate_hz.load(Ordering::Relaxed);
-            settings.windowless_frame_rate = hz.max(1) as i32;
-        }
+        // current builds cap at 60.
+        let hz = self.osr_view.frame_rate_hz.load(Ordering::Relaxed);
+        settings.windowless_frame_rate = hz.max(1) as i32;
 
-        // Build the render handler for OSR mode; None for windowed.
-        let render_handler = if self.mode == HostMode::Osr {
-            Some(make_osr_paint_handler(
-                self.osr_frame.clone(),
-                self.osr_view.clone(),
-                self.popup_frames.clone(),
-            ))
-        } else {
-            None
-        };
+        let render_handler = Some(make_osr_paint_handler(
+            self.osr_frame.clone(),
+            self.osr_view.clone(),
+            self.popup_frames.clone(),
+        ));
 
         let mut client = handlers::make_client(
             self.history.clone(),
