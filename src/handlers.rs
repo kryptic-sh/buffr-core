@@ -51,6 +51,21 @@ use cef::*;
 
 use crate::cursor::SharedCursorState;
 use crate::favicon::{FaviconEnabled, FaviconSink, FaviconUpdate, favicon_is_enabled};
+
+// CEF's `on_cursor_change` second arg is the OS-native cursor handle.
+// cef-rs ports it as a different Rust type per platform, and not always
+// the `cef::sys::cef_cursor_handle_t` typedef:
+//   linux   → c_ulong              (matches typedef)
+//   windows → *mut HICON__         (matches typedef)
+//   macos   → *mut u8              (NOT the typedef, which is *mut c_void)
+// We don't use the value, but the override has to match the trait
+// signature exactly. Alias here keeps the impl readable.
+#[cfg(target_os = "linux")]
+type CefCursorArg = ::std::os::raw::c_ulong;
+#[cfg(target_os = "windows")]
+type CefCursorArg = cef::sys::cef_cursor_handle_t;
+#[cfg(target_os = "macos")]
+type CefCursorArg = *mut u8;
 use crate::open_finder::{OsSpawn, open_path};
 use crate::osr::{OsrFrame, OsrViewState, PopupFrameMap};
 use crate::{PendingPopupAlloc, PopupCloseSink, PopupCreateSink, PopupCreated, PopupQueue};
@@ -796,11 +811,8 @@ wrap_display_handler! {
         fn on_cursor_change(
             &self,
             browser: Option<&mut Browser>,
-            // `cef_cursor_handle_t` is platform-specific: `c_ulong` on
-            // Linux, `*mut HICON__` on Windows, `*mut __ObjCObject` on
-            // macOS. Use the cef-sys typedef directly so the impl
-            // matches the trait on every target.
-            _cursor: cef::sys::cef_cursor_handle_t,
+            // Platform-specific cursor handle — see CefCursorArg alias.
+            _cursor: CefCursorArg,
             type_: CursorType,
             _custom_cursor_info: Option<&CursorInfo>,
         ) -> ::std::os::raw::c_int {
