@@ -1215,6 +1215,12 @@ impl BrowserHost {
         if let Some(host) = tabs[new_idx].browser.host() {
             host.was_hidden(0);
             host.was_resized();
+            // Force a re-paint at the (possibly updated) view_rect dims.
+            // Without invalidate, CEF may dedupe a redundant was_resized
+            // on a static page → no on_paint follows → embedder's
+            // last_osr_dims stays at whatever the previous tab left,
+            // which may not match the current browser_w/h.
+            host.invalidate(cef::PaintElementType::VIEW);
             host.set_focus(1);
         }
         *active = Some(new_idx);
