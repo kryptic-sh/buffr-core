@@ -196,11 +196,11 @@ pub struct BrowserHost {
     /// the UI thread via [`Self::osr_resize`]; read by the CEF IO
     /// thread inside `OsrPaintHandler::view_rect`.
     osr_view: SharedOsrViewState,
-    /// Clipboard sink. Lazily constructed once; guarded by `Mutex` so
-    /// `dispatch` (called from the UI thread) can reach it without
-    /// requiring `&mut self`. `hjkl_clipboard::Clipboard::new` is
-    /// infallible, so this is always `Some` after construction.
-    clipboard: Mutex<hjkl_clipboard::Clipboard>,
+    /// Clipboard sink. `hjkl_clipboard::Clipboard` (0.4+) is
+    /// `Clone + Send + Sync` with `&self` methods, so no interior
+    /// mutability is required. `Clipboard::new` may fail (no display,
+    /// missing libs); `None` disables clipboard ops gracefully.
+    clipboard: Option<hjkl_clipboard::Clipboard>,
     /// URLs queued by `LifeSpanHandler::on_before_popup` for new-tab
     /// dispositions (`NEW_FOREGROUND_TAB`, `NEW_BACKGROUND_TAB`). The
     /// main loop drains each tick and opens them as tabs.
@@ -377,18 +377,12 @@ impl BrowserHost {
             counters,
             osr_frame,
             osr_view,
-            clipboard: {
-                let mut cb = hjkl_clipboard::Clipboard::new();
-                // Probe: arboard's init failure is silently swallowed
-                // by hjkl-clipboard (falls back to OSC52, useless for
-                // a GUI app). A benign empty `set_text` distinguishes
-                // arboard-backed from OSC52-only at startup.
-                let probe = cb.set_text("");
-                tracing::info!(
-                    set_text_ok = probe,
-                    "clipboard probe: hjkl-clipboard set_text(\"\") result"
-                );
-                Mutex::new(cb)
+            clipboard: match hjkl_clipboard::Clipboard::new() {
+                Ok(cb) => Some(cb),
+                Err(err) => {
+                    tracing::warn!(error = %err, "clipboard: init failed; yank/paste disabled");
+                    None
+                }
             },
             popup_queue,
             address_sink,
@@ -1809,15 +1803,10 @@ impl BrowserHost {
                 self.with_active(|t| {
                     if let Some(frame) = t.browser.main_frame() {
                         let url = CefStringUtf16::from(&frame.url()).to_string();
-                        if let Ok(mut cb) = self.clipboard.lock() {
-                            if cb.set_text(&url) {
-                                tracing::debug!(url, "yanked URL to clipboard");
-                            } else {
-                                tracing::warn!(
-                                    url,
-                                    "yank failed: clipboard set_text returned false"
-                                );
-                            }
+                        if self.clipboard_set_text(&url) {
+                            tracing::debug!(url, "yanked URL to clipboard");
+                        } else {
+                            tracing::warn!(url, "yank failed: clipboard write failed");
                         }
                     } else {
                         tracing::warn!("YankUrl: main frame unavailable");
@@ -2064,55 +2053,40 @@ impl BrowserHost {
     /// or the platform read fails. Used by the apps layer's paste-as
     /// -tab dispatch before classifying the contents as a URL.
     pub fn clipboard_text(&self) -> Option<String> {
-        let arboard = self.clipboard.lock().ok().and_then(|mut cb| cb.get_text());
-        // arboard's Wayland reader has the same data-source-ownership
-        // issue as its writer (see `clipboard_set_text` FIXME): a
-        // selection set by another client can come back empty. Fall
-        // back to `wl-paste -n` (preserves trailing newlines? -n drops
-        // the synthetic one wl-paste appends) on Wayland Linux when
-        // arboard returns nothing.
-        #[cfg(target_os = "linux")]
-        {
-            if arboard.as_deref().is_none_or(str::is_empty)
-                && std::env::var_os("WAYLAND_DISPLAY").is_some()
-                && let Some(text) = wl_paste_pipe()
-            {
-                tracing::debug!(len = text.len(), "clipboard_text: wl-paste fallback hit");
-                return Some(text);
+        use hjkl_clipboard::{MimeType, Selection};
+        let cb = self.clipboard.as_ref()?;
+        match cb.get(Selection::Clipboard, MimeType::Text) {
+            Ok(bytes) => match String::from_utf8(bytes) {
+                Ok(s) if !s.is_empty() => Some(s),
+                Ok(_) => None,
+                Err(err) => {
+                    tracing::debug!(error = %err, "clipboard_text: non-utf8 payload");
+                    None
+                }
+            },
+            Err(err) => {
+                tracing::debug!(error = %err, "clipboard_text: read failed");
+                None
             }
         }
-        arboard
     }
 
     /// Write `text` to the system clipboard via `hjkl-clipboard`.
-    /// Returns the underlying `set_text` result (`true` on success).
-    /// Used by both YankUrl and YankSelection so both yanks land on
-    /// the same `+` register rather than Chromium's internal one.
-    //
-    // FIXME: arboard 3.6.1 (under hjkl-clipboard 0.3.0) reports
-    // set_text=true on Wayland but the wl_data_source is held in an
-    // internal worker thread that doesn't reliably serve paste
-    // requests from other clients — yanks land in the advertisement
-    // but pasting in another app comes up empty. As a stopgap we
-    // also pipe the text to `wl-copy` when running under Wayland;
-    // it forks a child that owns the selection from its own process
-    // and works universally. Drop this branch once hjkl-clipboard
-    // 0.4.0 ships the same fallback (see memory:
-    // project_hjkl_clipboard_wayland).
+    /// Returns `true` on success. Used by both YankUrl and YankSelection
+    /// so both yanks land on the same `+` register rather than
+    /// Chromium's internal one.
     pub fn clipboard_set_text(&self, text: &str) -> bool {
-        let arboard_ok = match self.clipboard.lock() {
-            Ok(mut cb) => cb.set_text(text),
-            Err(_) => false,
+        use hjkl_clipboard::{MimeType, Selection};
+        let Some(cb) = self.clipboard.as_ref() else {
+            return false;
         };
-        #[cfg(target_os = "linux")]
-        {
-            if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-                let wl_ok = wl_copy_pipe(text);
-                tracing::debug!(arboard_ok, wl_ok, "clipboard_set_text: wl-copy fallback");
-                return arboard_ok || wl_ok;
+        match cb.set(Selection::Clipboard, MimeType::Text, text.as_bytes()) {
+            Ok(()) => true,
+            Err(err) => {
+                tracing::warn!(error = %err, "clipboard_set_text: write failed");
+                false
             }
         }
-        arboard_ok
     }
 
     pub fn run_edit_cycle(&self, forward: bool) {
@@ -2233,58 +2207,6 @@ fn json_string_literal(s: &str) -> String {
 
 #[allow(dead_code)]
 fn _hint_used(_: Hint) {}
-
-// FIXME: drop once hjkl-clipboard 0.4.0 ships a built-in wl-copy
-// fallback (see memory: project_hjkl_clipboard_wayland).
-//
-// Pipe `text` into `wl-copy`'s stdin. Returns true only if the
-// binary spawned, accepted the write, and exited 0. Silently
-// returns false when `wl-copy` isn't on PATH (no warning — most
-// Read the system clipboard as text via `wl-paste -n` (no trailing
-// newline). Returns `None` if wl-paste isn't installed, the clipboard
-// is empty, or the read fails. Stopgap for arboard's read-side
-// breakage on Wayland — same root cause as the write side.
-#[cfg(target_os = "linux")]
-fn wl_paste_pipe() -> Option<String> {
-    use std::process::{Command, Stdio};
-    let out = Command::new("wl-paste")
-        .arg("-n")
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let s = String::from_utf8(out.stdout).ok()?;
-    if s.is_empty() { None } else { Some(s) }
-}
-
-// X11 / non-Linux machines won't have it and that's fine).
-#[cfg(target_os = "linux")]
-fn wl_copy_pipe(text: &str) -> bool {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
-    let mut child = match Command::new("wl-copy")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-    if let Some(mut stdin) = child.stdin.take()
-        && stdin.write_all(text.as_bytes()).is_err()
-    {
-        let _ = child.wait();
-        return false;
-    }
-    match child.wait() {
-        Ok(status) => status.success(),
-        Err(_) => false,
-    }
-}
 
 /// Pixels per scroll-unit. `ScrollDown(3)` therefore moves 120px,
 /// matching a typical "tap j three times" feel without making each
