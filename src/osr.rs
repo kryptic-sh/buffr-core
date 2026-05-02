@@ -380,3 +380,71 @@ pub fn make_osr_paint_handler(
 ) -> RenderHandler {
     OsrPaintHandler::new(Arc::new(AtomicI32::new(-1)), frame, view, popup_frames)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // OsrViewState is read by CEF's IO thread inside `view_rect` /
+    // `screen_info`. The embedder writes via `BrowserHost::osr_resize`
+    // (dims) and `BrowserHost::set_device_scale` (scale). These tests
+    // pin the contract: scale and dims are independent atomics; nothing
+    // in `set_scale` may touch the dim atomics, and nothing in dim
+    // writes may touch scale. Past bugs confused `BrowserHost::resize`
+    // (which leaves osr_view untouched) with `osr_resize` (which writes
+    // them) — the regression bites when chrome layout changes without
+    // a window resize.
+
+    #[test]
+    fn default_view_dims_and_scale() {
+        let v = OsrViewState::new();
+        assert_eq!(v.width.load(Ordering::Relaxed), 1280);
+        assert_eq!(v.height.load(Ordering::Relaxed), 800);
+        assert!((v.scale() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn set_scale_does_not_touch_dims() {
+        let v = OsrViewState::new();
+        v.width.store(1500, Ordering::Relaxed);
+        v.height.store(1050, Ordering::Relaxed);
+        v.set_scale(2.0);
+        assert_eq!(v.width.load(Ordering::Relaxed), 1500);
+        assert_eq!(v.height.load(Ordering::Relaxed), 1050);
+        assert!((v.scale() - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn set_scale_round_trips_thousandths() {
+        let v = OsrViewState::new();
+        v.set_scale(1.25);
+        assert!((v.scale() - 1.25).abs() < 1e-3);
+        v.set_scale(1.5);
+        assert!((v.scale() - 1.5).abs() < 1e-3);
+        v.set_scale(2.0);
+        assert!((v.scale() - 2.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn set_scale_clamps_to_at_least_one_thousandth() {
+        // Encoded as Q1000; floor = 1 thousandth = 0.001×. Guards against
+        // CEF receiving scale=0 if the embedder ever passes a degenerate
+        // value (BUFFR_SCALE override, monitor-yank race).
+        let v = OsrViewState::new();
+        v.set_scale(0.0);
+        assert!(v.scale() > 0.0);
+    }
+
+    #[test]
+    fn dim_writes_independent_of_scale() {
+        // Mirror what BrowserHost::osr_resize does — two atomic stores.
+        // Verify scale survives.
+        let v = OsrViewState::new();
+        v.set_scale(1.5);
+        v.width.store(2000, Ordering::Relaxed);
+        v.height.store(1400, Ordering::Relaxed);
+        assert!((v.scale() - 1.5).abs() < 1e-3);
+        assert_eq!(v.width.load(Ordering::Relaxed), 2000);
+        assert_eq!(v.height.load(Ordering::Relaxed), 1400);
+    }
+}
