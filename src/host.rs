@@ -786,6 +786,34 @@ impl BrowserHost {
         }
     }
 
+    /// Notify CEF that the screen / monitor info has changed (e.g. the window
+    /// moved to a display with a different scale factor). CEF will re-query
+    /// `RenderHandler::screen_info` and `view_rect` for all active tabs.
+    pub fn notify_screen_info_changed(&self) {
+        let Ok(tabs) = self.tabs.lock() else {
+            tracing::debug!("notify_screen_info_changed: tabs mutex poisoned");
+            return;
+        };
+        for t in tabs.iter() {
+            if let Some(host) = t.browser.host() {
+                host.notify_screen_info_changed();
+            }
+        }
+        tracing::debug!("notify_screen_info_changed: dispatched to all tabs");
+    }
+
+    /// Update the device scale factor stored in `OsrViewState` and notify
+    /// CEF so it re-queries `screen_info` and `view_rect`.
+    ///
+    /// Single entry point for live scale changes (monitor switch, DPI change).
+    /// The old scale is logged at `debug` level alongside the new value.
+    pub fn set_device_scale(&self, scale: f32) {
+        let old = self.osr_view.scale();
+        tracing::debug!(old_scale = old, new_scale = scale, "set_device_scale");
+        self.osr_view.set_scale(scale);
+        self.notify_screen_info_changed();
+    }
+
     /// Update the OSR frame rate target for ALL live browsers and
     /// any browsers created later. CEF clamps internally (current
     /// builds cap at 60 fps for windowless rendering); we accept

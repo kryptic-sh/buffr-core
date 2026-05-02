@@ -119,6 +119,17 @@ impl OsrViewState {
     pub fn set_wake(&self, wake: Arc<dyn Fn() + Send + Sync>) {
         let _ = self.wake.set(wake);
     }
+
+    /// Store the device scale factor (e.g. 1.5 → stored as 1500).
+    pub fn set_scale(&self, scale: f32) {
+        let v = (scale * 1000.0).round().max(1.0) as u32;
+        self.scale.store(v, Ordering::Relaxed);
+    }
+
+    /// Read the device scale factor (thousandths → float).
+    pub fn scale(&self) -> f32 {
+        self.scale.load(Ordering::Relaxed) as f32 / 1000.0
+    }
 }
 
 impl Default for OsrViewState {
@@ -154,6 +165,39 @@ wrap_render_handler! {
             rect.width = w as i32;
             rect.height = h as i32;
             tracing::debug!(browser_id = ?browser.as_deref().map(|b| b.identifier()), w = rect.width, h = rect.height, "osr: view_rect queried");
+        }
+
+        fn screen_info(
+            &self,
+            browser: Option<&mut Browser>,
+            screen_info: Option<&mut ScreenInfo>,
+        ) -> ::std::os::raw::c_int {
+            let Some(si) = screen_info else {
+                tracing::trace!("osr: screen_info — screen_info arg is None");
+                return 0;
+            };
+            let browser_id = browser.as_deref().map(|b| b.identifier());
+            let (w, h) = self.resolve_dims(browser_id);
+            let scale = self.resolve_scale(browser_id);
+            tracing::debug!(
+                ?browser_id,
+                w,
+                h,
+                scale,
+                "osr: screen_info queried",
+            );
+            si.device_scale_factor = scale;
+            si.depth = 32;
+            si.depth_per_component = 8;
+            si.is_monochrome = 0;
+            si.rect = Rect {
+                x: 0,
+                y: 0,
+                width: w as i32,
+                height: h as i32,
+            };
+            si.available_rect = si.rect.clone();
+            1
         }
 
         fn screen_point(
@@ -252,6 +296,22 @@ wrap_render_handler! {
 }
 
 impl OsrPaintHandler {
+    /// Resolve the scale factor for the given browser id.
+    fn resolve_scale(&self, browser_id: Option<i32>) -> f32 {
+        if let Some(id) = browser_id {
+            let main = self.main_id.load(Ordering::Relaxed);
+            if main == id || main == -1 {
+                return self.view.scale();
+            }
+            if let Ok(map) = self.popup_frames.lock()
+                && let Some((_, popup_view)) = map.get(&id)
+            {
+                return popup_view.scale();
+            }
+        }
+        self.view.scale()
+    }
+
     /// Resolve (width, height) for the given browser id.
     fn resolve_dims(&self, browser_id: Option<i32>) -> (u32, u32) {
         if let Some(id) = browser_id {
