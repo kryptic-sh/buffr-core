@@ -1273,6 +1273,38 @@ impl BrowserHost {
         self.active.lock().ok().and_then(|g| *g)
     }
 
+    /// Aggressive force-repaint: cycle was_hidden(1) → was_hidden(0)
+    /// to mimic the tab-switch repaint trigger that bypasses CEF's
+    /// invalidate(VIEW) deduplication.
+    ///
+    /// Used by the embedder's resize-paint watchdog when CEF fails to
+    /// emit on_paint at the expected dims within the timeout. Same
+    /// call sequence as set_active_index uses for the newly-activated
+    /// browser, except it sandwiches a was_hidden(1) → was_hidden(0)
+    /// transition instead of relying on the prior tab having been
+    /// hidden.
+    ///
+    /// CEF caveats: the brief was_hidden(1) state can pause some
+    /// renderer-side timers. The window is sub-millisecond in practice,
+    /// so observable side effects are negligible.
+    pub fn force_repaint_active(&self) {
+        let Ok(tabs) = self.tabs.lock() else {
+            tracing::debug!("force_repaint_active: tabs mutex poisoned");
+            return;
+        };
+        let active_idx = self.active.lock().ok().and_then(|g| *g);
+        if let Some(idx) = active_idx
+            && let Some(t) = tabs.get(idx)
+            && let Some(host) = t.browser.host()
+        {
+            tracing::debug!(idx, "force_repaint_active: was_hidden cycle");
+            host.was_hidden(1);
+            host.was_hidden(0);
+            host.was_resized();
+            host.invalidate(cef::PaintElementType::VIEW);
+        }
+    }
+
     fn summarize(&self, t: &Tab) -> TabSummary {
         TabSummary {
             id: t.id,
