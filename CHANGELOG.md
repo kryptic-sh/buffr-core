@@ -6,6 +6,14 @@ All notable changes to `buffr-core` are documented here. Format follows
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-05-03
+
+### Fixed
+
+- `buffr-config` dep constraint bumped from `"0.1"` to `"0.2"`. 0.3.0 was
+  published with the stale pin, which prevented it from resolving alongside the
+  new `buffr-config 0.2.0` on crates.io.
+
 ## [0.3.0] — 2026-05-03
 
 ### Changed
@@ -92,7 +100,8 @@ without `$HOME`).
 - Added per-repo CI (fmt / clippy / test matrix / cargo-deny) and a tag-driven
   release workflow that publishes idempotently to crates.io.
 
-[Unreleased]: https://github.com/kryptic-sh/buffr-core/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/kryptic-sh/buffr-core/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/kryptic-sh/buffr-core/releases/tag/v0.3.1
 [0.3.0]: https://github.com/kryptic-sh/buffr-core/releases/tag/v0.3.0
 [0.2.0]: https://github.com/kryptic-sh/buffr-core/releases/tag/v0.2.0
 [0.1.3]: https://github.com/kryptic-sh/buffr-core/releases/tag/v0.1.3
