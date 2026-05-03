@@ -18,7 +18,7 @@
 //! `set_focus(true)` on the next. See `docs/multi-tab.md`.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use buffr_config::DownloadsConfig;
@@ -201,6 +201,11 @@ pub struct BrowserHost {
     /// mutability is required. `Clipboard::new` may fail (no display,
     /// missing libs); `None` disables clipboard ops gracefully.
     clipboard: Option<hjkl_clipboard::Clipboard>,
+    /// Set by `BuffrLoadHandler::on_load_start` (main frame), cleared
+    /// by `OsrPaintHandler::on_paint`. Apps layer reads via
+    /// [`Self::is_loading`] to keep the loading anim playing across
+    /// the navigation gap until the first contentful frame commits.
+    loading_busy: Arc<AtomicBool>,
     /// URLs queued by `LifeSpanHandler::on_before_popup` for new-tab
     /// dispositions (`NEW_FOREGROUND_TAB`, `NEW_BACKGROUND_TAB`). The
     /// main loop drains each tick and opens them as tabs.
@@ -397,6 +402,7 @@ impl BrowserHost {
             cursor_state: Arc::new(CursorState::new()),
             favicon_sink: new_favicon_sink(),
             favicon_enabled: new_favicon_enabled(show_favicons),
+            loading_busy: Arc::new(AtomicBool::new(false)),
         };
         host.open_tab(url)?;
         Ok(host)
@@ -1109,6 +1115,7 @@ impl BrowserHost {
             self.osr_frame.clone(),
             self.osr_view.clone(),
             self.popup_frames.clone(),
+            self.loading_busy.clone(),
         ));
 
         let mut client = handlers::make_client(
@@ -1135,6 +1142,7 @@ impl BrowserHost {
             self.cursor_state.clone(),
             self.favicon_sink.clone(),
             self.favicon_enabled.clone(),
+            self.loading_busy.clone(),
         );
         let browser = browser_host_create_browser_sync(
             Some(&window_info),
@@ -2052,6 +2060,16 @@ impl BrowserHost {
     /// clipboard is empty, holds non-text content (image, files, …),
     /// or the platform read fails. Used by the apps layer's paste-as
     /// -tab dispatch before classifying the contents as a URL.
+    /// Is a main-frame navigation currently in flight?
+    ///
+    /// Set by `BuffrLoadHandler::on_load_start` and cleared by the
+    /// next successful `OsrPaintHandler::on_paint`. The apps layer
+    /// uses this to keep the loading anim playing across the
+    /// navigation gap until the first contentful frame commits.
+    pub fn is_loading(&self) -> bool {
+        self.loading_busy.load(Ordering::Relaxed)
+    }
+
     pub fn clipboard_text(&self) -> Option<String> {
         use hjkl_clipboard::{MimeType, Selection};
         let cb = self.clipboard.as_ref()?;

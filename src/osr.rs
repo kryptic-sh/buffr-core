@@ -40,7 +40,7 @@
 //! - unknown → skip with a trace log
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use cef::*;
@@ -148,12 +148,17 @@ pub type PopupFrameMap = Arc<Mutex<HashMap<i32, (SharedOsrFrame, SharedOsrViewSt
 
 // ── RenderHandler impl ─────────────────────────────────────────────────────────
 
+// `loading_busy`: cleared on every successful main-frame `on_paint`.
+// Set by `BuffrLoadHandler::on_load_start` so the embedder can show
+// a loading animation across the navigation gap and stop it the
+// moment the next paint commits.
 wrap_render_handler! {
     pub struct OsrPaintHandler {
         main_id: Arc<AtomicI32>,
         frame: SharedOsrFrame,
         view: SharedOsrViewState,
         popup_frames: PopupFrameMap,
+        loading_busy: Arc<AtomicBool>,
     }
 
     impl RenderHandler {
@@ -287,6 +292,9 @@ wrap_render_handler! {
             guard.pixels.copy_from_slice(src);
             guard.generation = guard.generation.wrapping_add(1);
             drop(guard);
+            // First contentful paint after a navigation clears the
+            // loading-busy gate — embedder stops the loading anim.
+            self.loading_busy.store(false, Ordering::Relaxed);
             // Wake the embedder so the UI loop can pump a redraw.
             if let Some(wake) = view.wake.get() {
                 wake();
@@ -377,8 +385,15 @@ pub fn make_osr_paint_handler(
     frame: SharedOsrFrame,
     view: SharedOsrViewState,
     popup_frames: PopupFrameMap,
+    loading_busy: Arc<AtomicBool>,
 ) -> RenderHandler {
-    OsrPaintHandler::new(Arc::new(AtomicI32::new(-1)), frame, view, popup_frames)
+    OsrPaintHandler::new(
+        Arc::new(AtomicI32::new(-1)),
+        frame,
+        view,
+        popup_frames,
+        loading_busy,
+    )
 }
 
 #[cfg(test)]

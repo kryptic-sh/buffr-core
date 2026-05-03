@@ -25,6 +25,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use buffr_config::DownloadsConfig;
@@ -102,6 +103,7 @@ pub fn make_client(
     cursor_state: SharedCursorState,
     favicon_sink: FaviconSink,
     favicon_enabled: FaviconEnabled,
+    loading_busy: Arc<AtomicBool>,
 ) -> Client {
     BuffrClient::new(
         history,
@@ -127,6 +129,7 @@ pub fn make_client(
         cursor_state,
         favicon_sink,
         favicon_enabled,
+        loading_busy,
     )
 }
 
@@ -138,6 +141,7 @@ pub fn make_load_handler(
     zoom: Arc<ZoomStore>,
     counters: Option<Arc<UsageCounters>>,
     edit_sink: EditEventSink,
+    loading_busy: Arc<AtomicBool>,
 ) -> LoadHandler {
     BuffrLoadHandler::new(
         history,
@@ -145,6 +149,7 @@ pub fn make_load_handler(
         counters,
         Arc::new(Mutex::new(HashMap::new())),
         edit_sink,
+        loading_busy,
     )
 }
 
@@ -411,6 +416,9 @@ wrap_client! {
         cursor_state: SharedCursorState,
         favicon_sink: FaviconSink,
         favicon_enabled: FaviconEnabled,
+        // loading_busy: shared with BuffrLoadHandler (set on
+        // on_load_start) and OsrPaintHandler (cleared on on_paint).
+        loading_busy: Arc<AtomicBool>,
     }
 
     impl Client {
@@ -425,6 +433,7 @@ wrap_client! {
                 self.counters.clone(),
                 Arc::new(Mutex::new(HashMap::new())),
                 self.edit_sink.clone(),
+                self.loading_busy.clone(),
             ))
         }
 
@@ -522,6 +531,11 @@ wrap_load_handler! {
         // Shared with BuffrDisplayHandler: write the injected edit.js
         // script on load; display handler reads events from the queue.
         edit_sink: EditEventSink,
+        // loading_busy: set on main-frame on_load_start, cleared on
+        // the next OsrPaintHandler::on_paint. The embedder reads
+        // this via `BrowserHost::is_loading` to play the buffr ASCII
+        // anim across the navigation gap.
+        loading_busy: Arc<AtomicBool>,
     }
 
     impl LoadHandler {
@@ -543,6 +557,9 @@ wrap_load_handler! {
             if let Ok(mut map) = self.pending_transitions.lock() {
                 map.insert(id, transition);
             }
+            // Mark the navigation in flight; OsrPaintHandler::on_paint
+            // clears this on the first commit of the new document.
+            self.loading_busy.store(true, std::sync::atomic::Ordering::Relaxed);
         }
 
         fn on_load_end(
