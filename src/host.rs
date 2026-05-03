@@ -2070,6 +2070,17 @@ impl BrowserHost {
     /// clipboard is empty, holds non-text content (image, files, …),
     /// or the platform read fails. Used by the apps layer's paste-as
     /// -tab dispatch before classifying the contents as a URL.
+    /// Clone the clipboard handle so the embedder can do reads on a
+    /// worker thread (avoiding the Wayland self-deadlock when Chromium
+    /// owns the clipboard and the wl_data_source.send callback runs on
+    /// CEF's UI thread, i.e. the main thread).
+    ///
+    /// `hjkl_clipboard::Clipboard` is `Clone + Send + Sync` so this is
+    /// a cheap reference clone, not a re-init.
+    pub fn clipboard_handle(&self) -> Option<hjkl_clipboard::Clipboard> {
+        self.clipboard.clone()
+    }
+
     /// Is a main-frame navigation currently in flight?
     ///
     /// Set by `BuffrLoadHandler::on_load_start` and cleared by the
