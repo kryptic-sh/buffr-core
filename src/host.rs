@@ -922,6 +922,16 @@ impl BrowserHost {
         if let Ok(mut last) = self.last_size.lock() {
             *last = (width, height);
         }
+        // Mark the cached frame as stale-until-next-paint. Without this,
+        // an in-flight on_paint at the OLD dims persists in `osr_frame`;
+        // when the user toggles back to those dims via a subsequent
+        // `osr_resize`, the embedder's freshness gate would re-accept
+        // the stale pixels because frame.dims == osr_view (by chance).
+        // Forcing the gate to wait for a real post-resize paint avoids
+        // showing the previous toggle's content at correct dimensions.
+        if let Ok(mut frame) = self.osr_frame.lock() {
+            frame.needs_fresh = true;
+        }
         self.notify_was_resized(width, height);
     }
 

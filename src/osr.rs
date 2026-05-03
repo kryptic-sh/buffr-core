@@ -60,6 +60,13 @@ pub struct OsrFrame {
     /// Bumped on every successful on_paint so consumers can skip composite
     /// when nothing changed.
     pub generation: u64,
+    /// Set by `BrowserHost::osr_resize`, cleared by the next `on_paint`.
+    /// Gates the freshness check on the embedder side: if a paint at OLD
+    /// dims persists across `osr_resize` and the user toggles back to
+    /// those dims, the gate would otherwise re-accept it as "fresh"
+    /// because dims happen to match `osr_view`. This flag forces the
+    /// gate to wait for an actual on_paint emitted *after* the resize.
+    pub needs_fresh: bool,
 }
 
 impl OsrFrame {
@@ -71,6 +78,7 @@ impl OsrFrame {
             height,
             pixels: vec![0u8; len],
             generation: 0,
+            needs_fresh: false,
         }
     }
 }
@@ -291,6 +299,11 @@ wrap_render_handler! {
 
             guard.pixels.copy_from_slice(src);
             guard.generation = guard.generation.wrapping_add(1);
+            // Pair with `BrowserHost::osr_resize` setting this true.
+            // The next gate-check on the embedder side now treats this
+            // paint as a real post-resize commit, regardless of whether
+            // its dims happen to match a recent `osr_view`.
+            guard.needs_fresh = false;
             drop(guard);
             // First contentful paint after a navigation clears the
             // loading-busy gate — embedder stops the loading anim.
