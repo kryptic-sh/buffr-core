@@ -278,6 +278,32 @@ struct ClosedTab {
 // cost — Chromium browsers are expensive even hidden.
 const CLOSED_STACK_CAP: usize = 8;
 
+/// Opaque clipboard reader handed out by `BrowserHost::clipboard_handle`.
+///
+/// Wraps the underlying `hjkl-clipboard` handle so embedders can read
+/// the system clipboard from a worker thread without depending on the
+/// crate directly. The handle is `Clone + Send + Sync`, so the wrapper
+/// is too — clone it freely, move it across threads.
+#[derive(Clone)]
+pub struct ClipboardReader(hjkl_clipboard::Clipboard);
+
+impl ClipboardReader {
+    /// Block until the system clipboard yields a non-empty UTF-8 text
+    /// payload, or return `None` if it's empty, non-text, or the read
+    /// fails. Must be called off the CEF UI thread to avoid the
+    /// Wayland self-deadlock when Chromium owns the selection.
+    pub fn read_text(&self) -> Option<String> {
+        use hjkl_clipboard::{MimeType, Selection};
+        match self.0.get(Selection::Clipboard, MimeType::Text) {
+            Ok(bytes) => String::from_utf8(bytes).ok().filter(|s| !s.is_empty()),
+            Err(err) => {
+                tracing::debug!(error = %err, "ClipboardReader::read_text: read failed");
+                None
+            }
+        }
+    }
+}
+
 impl BrowserHost {
     /// Create the host with a single initial tab loading `url`.
     ///
@@ -2075,10 +2101,11 @@ impl BrowserHost {
     /// owns the clipboard and the wl_data_source.send callback runs on
     /// CEF's UI thread, i.e. the main thread).
     ///
-    /// `hjkl_clipboard::Clipboard` is `Clone + Send + Sync` so this is
-    /// a cheap reference clone, not a re-init.
-    pub fn clipboard_handle(&self) -> Option<hjkl_clipboard::Clipboard> {
-        self.clipboard.clone()
+    /// Returns an opaque `ClipboardReader` so callers don't pull in
+    /// `hjkl-clipboard` directly. The underlying handle is
+    /// `Clone + Send + Sync`, so this is a cheap reference clone.
+    pub fn clipboard_handle(&self) -> Option<ClipboardReader> {
+        self.clipboard.clone().map(ClipboardReader)
     }
 
     /// Is a main-frame navigation currently in flight?
