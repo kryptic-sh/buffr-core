@@ -22,7 +22,7 @@ cef = "147"
 anyhow = "1"
 thiserror = "2"
 tracing = "0.1"
-directories = "6"
+hjkl-config = "0.2"
 raw-window-handle = "0.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

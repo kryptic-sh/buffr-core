@@ -6,6 +6,28 @@ All notable changes to `buffr-core` are documented here. Format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **`profile_paths()` migrated to `hjkl-config` 0.2 (XDG-everywhere).** Cache +
+  data dirs now come from `hjkl_config::cache_dir("buffr")` /
+  `hjkl_config::data_dir("buffr")` instead of `directories::ProjectDirs`. Fixes
+  a split-brain on macOS/Windows where `buffr-config` already routed through
+  `hjkl-config` (writing `~/.config/buffr/config.toml`) but `buffr-core` was
+  still resolving cache + data via the old `sh.kryptic.buffr` Bundle ID layout.
+  Now every dir buffr touches is XDG-everywhere.
+- macOS users: cache moves from `~/Library/Caches/sh.kryptic.buffr/` to
+  `~/.cache/buffr/`; data moves from
+  `~/Library/Application Support/sh.kryptic.buffr/` to `~/.local/share/buffr/`.
+- Windows users: cache moves from `%LOCALAPPDATA%\kryptic\buffr\cache\` to
+  `~/.cache/buffr/`; data moves from `%APPDATA%\kryptic\buffr\data\` to
+  `~/.local/share/buffr/`.
+- Linux users: paths unchanged (`~/.cache/buffr/`, `~/.local/share/buffr/`).
+- Replaced `directories` dep with `hjkl-config = "0.2"`.
+
+`CoreError::NoProjectDirs` variant name preserved for back-compat; semantics
+widen slightly to "no XDG home dir resolvable" (only fires in sandboxed envs
+without `$HOME`).
+
 ## [0.2.0] — 2026-05-03
 
 ### Added

@@ -7,10 +7,8 @@
 //! and render-process IPC.
 
 use std::collections::VecDeque;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use directories::ProjectDirs;
 use thiserror::Error;
 
 pub mod app;
@@ -210,10 +208,15 @@ pub fn init_cef_api() {
 
 /// Resolve buffr's per-user profile + cache directories. Created on
 /// first call.
+///
+/// Routes through [`hjkl_config::data_dir`] / [`hjkl_config::cache_dir`]
+/// so paths match the XDG-everywhere layout buffr-config produces — no
+/// more split-brain on macOS/Windows where the user file lived under
+/// `~/.config/buffr/` while cache/data lived under
+/// `~/Library/Application Support/sh.kryptic.buffr/`. Linux unchanged.
 pub fn profile_paths() -> Result<ProfilePaths, CoreError> {
-    let dirs = ProjectDirs::from("sh", "kryptic", "buffr").ok_or(CoreError::NoProjectDirs)?;
-    let cache: PathBuf = dirs.cache_dir().to_path_buf();
-    let data: PathBuf = dirs.data_dir().to_path_buf();
+    let cache = hjkl_config::cache_dir("buffr").map_err(|_| CoreError::NoProjectDirs)?;
+    let data = hjkl_config::data_dir("buffr").map_err(|_| CoreError::NoProjectDirs)?;
     let _ = std::fs::create_dir_all(&cache);
     let _ = std::fs::create_dir_all(&data);
     Ok(ProfilePaths { cache, data })
