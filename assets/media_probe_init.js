@@ -80,9 +80,15 @@
 
                 return pc;
             };
-            // Copy static methods / properties (e.g. generateCertificate).
+            // Copy static methods / properties (e.g. generateCertificate)
+            // by chaining the patched ctor's __proto__ to the original.
             Object.setPrototypeOf(window.RTCPeerConnection, OrigRTCPeerConnection);
-            Object.setPrototypeOf(window.RTCPeerConnection.prototype, OrigRTCPeerConnection.prototype);
+            // Alias the prototype property so `pc instanceof RTCPeerConnection`
+            // still works — pc's prototype chain is rooted at the original
+            // prototype (since `new OrigRTCPeerConnection(...)` was used), so
+            // the patched ctor's `.prototype` must BE that same object, not
+            // merely chain to it.
+            window.RTCPeerConnection.prototype = OrigRTCPeerConnection.prototype;
         }
     } catch (_e) {}
 
