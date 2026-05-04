@@ -2265,11 +2265,17 @@ impl BrowserHost {
         });
     }
 
-    /// Fire the JS media-activity probe against the active tab's main frame.
+    /// Fire the JS media-activity poll against the active tab's main frame.
     ///
-    /// The probe (see [`crate::scripts::MEDIA_PROBE_JS`]) writes its result
-    /// to `window.__buffr_media_active`.  A follow-up JS snippet can read it
+    /// The poll script (see [`crate::scripts::MEDIA_PROBE_POLL_JS`]) reads all
+    /// five signal sources and writes a boolean result to
+    /// `window.__buffr_media_active`.  A follow-up JS snippet can read it
     /// back on the next tick via [`Self::read_media_probe_result`].
+    ///
+    /// The patched-constructor signals (signals 3–5) only work after the init
+    /// script ([`crate::scripts::MEDIA_PROBE_INIT_JS`]) has been injected at
+    /// page-load time.  If it hasn't run yet the poll degrades gracefully to
+    /// the v1 signals (mediaSession + fullscreen video).
     ///
     /// ## Why fire-and-forget?
     ///
@@ -2280,7 +2286,7 @@ impl BrowserHost {
     /// which is out of scope for phase-1.  The two-call window-property
     /// approach is cheap and correct: probe writes, reader reads one tick later.
     pub fn run_media_probe(&self) {
-        self.run_js(crate::scripts::MEDIA_PROBE_JS);
+        self.run_js(crate::scripts::MEDIA_PROBE_POLL_JS);
     }
 
     /// Read the result written by the last [`Self::run_media_probe`] call.

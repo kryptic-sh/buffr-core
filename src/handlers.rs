@@ -43,6 +43,7 @@ use crate::permissions::{
     PendingPermission, PermissionsQueue, capabilities_for_media_mask,
     capabilities_for_request_mask, precheck,
 };
+use crate::scripts::MEDIA_PROBE_INIT_JS;
 use crate::telemetry::{KEY_DOWNLOADS_COMPLETED, KEY_PAGES_LOADED, UsageCounters};
 // `wrap_client!` / `wrap_load_handler!` / `wrap_display_handler!` /
 // `wrap_download_handler!` expand to references to bare `Client`,
@@ -674,6 +675,17 @@ wrap_load_handler! {
             // `self.edit_sink` is held for Stage 2 sink ownership; the
             // display handler writes into it when console events arrive.
             let _ = &self.edit_sink;
+
+            // Media-probe Phase 1.5: inject the patched-constructor init
+            // script once per main-frame load. The script is idempotent
+            // (`window.__buffr_media_probe_installed` guard) so SPA
+            // soft-navigations that re-trigger on_load_end are safe.
+            // This installs the three new signal patches (silent video,
+            // WebRTC, Screen Wake Lock) so the poll script can read them.
+            let media_init_cef = CefString::from(MEDIA_PROBE_INIT_JS);
+            let media_init_url = CefString::from("buffr://media-probe-init");
+            frame.execute_java_script(Some(&media_init_cef), Some(&media_init_url), 1);
+            tracing::debug!(target: "buffr_core::handlers", %url, "media-probe: injected init script into main frame");
         }
     }
 }
