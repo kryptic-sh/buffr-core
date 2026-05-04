@@ -34,6 +34,7 @@ use buffr_history::{History, Transition};
 use buffr_permissions::{Decision, Permissions};
 use buffr_zoom::ZoomStore;
 
+use crate::audio::{AudioEventQueue, AudioStateSink, BuffrAudioHandler};
 use crate::download_notice::{DownloadNotice, DownloadNoticeKind, DownloadNoticeQueue, push};
 use crate::edit::{EditEventSink, build_inject_script as build_edit_inject_script};
 use crate::find::{FindResult, FindResultSink};
@@ -104,6 +105,8 @@ pub fn make_client(
     favicon_sink: FaviconSink,
     favicon_enabled: FaviconEnabled,
     loading_busy: Arc<AtomicBool>,
+    audio_sink: AudioStateSink,
+    audio_queue: AudioEventQueue,
 ) -> Client {
     BuffrClient::new(
         history,
@@ -130,6 +133,8 @@ pub fn make_client(
         favicon_sink,
         favicon_enabled,
         loading_busy,
+        audio_sink,
+        audio_queue,
     )
 }
 
@@ -419,9 +424,18 @@ wrap_client! {
         // loading_busy: shared with BuffrLoadHandler (set on
         // on_load_start) and OsrPaintHandler (cleared on on_paint).
         loading_busy: Arc<AtomicBool>,
+        audio_sink: AudioStateSink,
+        audio_queue: AudioEventQueue,
     }
 
     impl Client {
+        fn audio_handler(&self) -> Option<AudioHandler> {
+            Some(BuffrAudioHandler::make(
+                self.audio_sink.clone(),
+                self.audio_queue.clone(),
+            ))
+        }
+
         fn render_handler(&self) -> Option<RenderHandler> {
             self.render_handler.clone()
         }

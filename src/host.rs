@@ -32,6 +32,10 @@ use cef::{
 };
 use tracing::{info, warn};
 
+use crate::audio::{
+    AudioEventQueue, AudioStateSink, any_audio_active as audio_any_active,
+    drain_audio_events as audio_drain_events, new_audio_event_queue, new_audio_state_sink,
+};
 use crate::cursor::{CursorState, SharedCursorState};
 use crate::download_notice::DownloadNoticeQueue;
 use crate::edit::EditEventSink;
@@ -260,6 +264,13 @@ pub struct BrowserHost {
     /// `[general] show_favicons`. When false, `on_favicon_urlchange`
     /// short-circuits before issuing a `download_image` call.
     favicon_enabled: FaviconEnabled,
+    /// Per-browser audio stream state. Written by [`BuffrAudioHandler`] on
+    /// the CEF audio thread; read by the UI thread via [`Self::any_audio_active`].
+    audio_sink: AudioStateSink,
+    /// Edge-event queue: one entry per active→inactive or inactive→active
+    /// transition per browser. Drained by the UI thread each tick via
+    /// [`Self::drain_audio_events`].
+    audio_queue: AudioEventQueue,
 }
 
 /// Stashed live tab for `reopen_closed_tab`. The CEF browser is kept
@@ -429,6 +440,8 @@ impl BrowserHost {
             favicon_sink: new_favicon_sink(),
             favicon_enabled: new_favicon_enabled(show_favicons),
             loading_busy: Arc::new(AtomicBool::new(false)),
+            audio_sink: new_audio_state_sink(),
+            audio_queue: new_audio_event_queue(),
         };
         host.open_tab(url)?;
         Ok(host)
@@ -1179,6 +1192,8 @@ impl BrowserHost {
             self.favicon_sink.clone(),
             self.favicon_enabled.clone(),
             self.loading_busy.clone(),
+            self.audio_sink.clone(),
+            self.audio_queue.clone(),
         );
         let browser = browser_host_create_browser_sync(
             Some(&window_info),
@@ -1341,6 +1356,72 @@ impl BrowserHost {
             host.was_resized();
             host.invalidate(cef::PaintElementType::VIEW);
         }
+    }
+
+    // ── OSR sleep / wake helpers ─────────────────────────────────────────────
+
+    /// Put the active tab's CEF browser to sleep or wake it.
+    ///
+    /// Sleep path: calls `was_hidden(1)` on the active tab's browser host.
+    /// This is the same mechanism tab-switch uses to pause inactive tabs, so
+    /// it is well-tested and avoids inventing a parallel pause path.
+    ///
+    /// **Audio note**: in testing, `was_hidden(1)` does *not* cut audio for
+    /// YouTube/Spotify — CEF continues the audio decode pipeline regardless of
+    /// the paint-scheduling hint.  If a future regression is found, the fallback
+    /// strategy is to call `was_hidden(0)` immediately (keep CEF painting) but
+    /// skip the wgpu `surface.acquire_texture` call in the apps layer.  That
+    /// fallback is not implemented here; the simpler path is tried first.
+    pub fn osr_sleep(&self, sleep: bool) {
+        let Ok(tabs) = self.tabs.lock() else { return };
+        let active_idx = self.active.lock().ok().and_then(|g| *g);
+        if let Some(idx) = active_idx
+            && let Some(t) = tabs.get(idx)
+            && let Some(host) = t.browser.host()
+        {
+            host.was_hidden(if sleep { 1 } else { 0 });
+            tracing::debug!(
+                target: "buffr_core::host",
+                sleep,
+                idx,
+                "osr_sleep"
+            );
+        }
+    }
+
+    /// Wake helper: nudge CEF to deliver a fresh paint after waking from
+    /// sleep.  Calls `was_resized` then `invalidate(VIEW)` on the active
+    /// tab — same sequence as [`Self::set_active_index`] uses for the
+    /// newly-activated browser so CEF deduplications are bypassed.
+    pub fn osr_invalidate_view(&self) {
+        let Ok(tabs) = self.tabs.lock() else { return };
+        let active_idx = self.active.lock().ok().and_then(|g| *g);
+        if let Some(idx) = active_idx
+            && let Some(t) = tabs.get(idx)
+            && let Some(host) = t.browser.host()
+        {
+            host.was_resized();
+            host.invalidate(cef::PaintElementType::VIEW);
+            tracing::debug!(
+                target: "buffr_core::host",
+                idx,
+                "osr_invalidate_view"
+            );
+        }
+    }
+
+    // ── Audio-state accessors (for OSR sleep policy) ──────────────────────────
+
+    /// `true` when at least one browser tracked by the audio handler has an
+    /// active audio stream.  Cheap snapshot — takes the audio-sink mutex once.
+    pub fn any_audio_active(&self) -> bool {
+        audio_any_active(&self.audio_sink)
+    }
+
+    /// Drain all pending [`AudioEvent`]s that [`BuffrAudioHandler`] pushed
+    /// since the last call.  Returns an empty `Vec` on mutex poison.
+    pub fn drain_audio_events(&self) -> Vec<crate::audio::AudioEvent> {
+        audio_drain_events(&self.audio_queue)
     }
 
     fn summarize(&self, t: &Tab) -> TabSummary {
@@ -2182,6 +2263,42 @@ impl BrowserHost {
             let script_url = CefString::from("buffr://page-action");
             frame.execute_java_script(Some(&code), Some(&script_url), 0);
         });
+    }
+
+    /// Fire the JS media-activity probe against the active tab's main frame.
+    ///
+    /// The probe (see [`crate::scripts::MEDIA_PROBE_JS`]) writes its result
+    /// to `window.__buffr_media_active`.  A follow-up JS snippet can read it
+    /// back on the next tick via [`Self::read_media_probe_result`].
+    ///
+    /// ## Why fire-and-forget?
+    ///
+    /// `cef::Frame::execute_java_script` does not expose a return-value path —
+    /// the cef-rs binding has no `StringVisitor` overload for `execute_java_script`
+    /// (only `get_text`/`get_source` carry a visitor callback).  A full
+    /// return-value bridge would require a custom scheme + IPC round-trip,
+    /// which is out of scope for phase-1.  The two-call window-property
+    /// approach is cheap and correct: probe writes, reader reads one tick later.
+    pub fn run_media_probe(&self) {
+        self.run_js(crate::scripts::MEDIA_PROBE_JS);
+    }
+
+    /// Read the result written by the last [`Self::run_media_probe`] call.
+    ///
+    /// Executes a tiny inline JS snippet that reads `window.__buffr_media_active`
+    /// (a boolean written by the probe) and pushes the result via the audio
+    /// event queue as a synthetic entry so the UI thread can consume it with
+    /// the same `drain_audio_events` path.
+    ///
+    /// Currently not implemented: cef-rs `execute_java_script` has no
+    /// synchronous return-value mechanism and the async visitor path would
+    /// require a custom scheme.  Phase-1 relies solely on the CEF
+    /// `AudioHandler` for media detection; this method is a placeholder.
+    /// See `MEDIA_PROBE_JS` doc comment for the rationale.
+    pub fn read_media_probe_result(&self) {
+        // Phase-1: no-op. Detection relies on BuffrAudioHandler alone.
+        // Phase-2 can implement a custom-scheme IPC to read
+        // window.__buffr_media_active from the JS side.
     }
 
     fn scroll_by(&self, dx: i64, dy: i64) {

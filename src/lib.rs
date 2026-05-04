@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
 pub mod app;
+pub mod audio;
 pub mod cmdline;
 pub mod crash;
 pub mod cursor;
@@ -38,6 +39,10 @@ pub use app::{
     BuffrApp, ProfilePaths, device_scale_factor, force_renderer_accessibility_enabled,
     set_device_scale_factor, set_force_renderer_accessibility,
     take_scheduled_message_pump_delay_ms,
+};
+pub use audio::{
+    AudioEvent, AudioEventQueue, AudioState, AudioStateSink, any_audio_active, drain_audio_events,
+    new_audio_event_queue, new_audio_state_sink,
 };
 pub use crash::{CrashError, CrashReport, CrashReporter};
 pub use cursor::{CursorState, SharedCursorState};
