@@ -220,8 +220,10 @@ pub fn init_cef_api() {
 /// `~/.config/buffr/` while cache/data lived under
 /// `~/Library/Application Support/sh.kryptic.buffr/`. Linux unchanged.
 pub fn profile_paths() -> Result<ProfilePaths, CoreError> {
-    let cache = hjkl_config::cache_dir("buffr").map_err(|_| CoreError::NoProjectDirs)?;
-    let data = hjkl_config::data_dir("buffr").map_err(|_| CoreError::NoProjectDirs)?;
+    use hjkl_config::AppConfig;
+    let app = <buffr_config::Config as AppConfig>::APPLICATION;
+    let cache = hjkl_config::cache_dir(app).map_err(|_| CoreError::NoProjectDirs)?;
+    let data = hjkl_config::data_dir(app).map_err(|_| CoreError::NoProjectDirs)?;
     let _ = std::fs::create_dir_all(&cache);
     let _ = std::fs::create_dir_all(&data);
     Ok(ProfilePaths { cache, data })
