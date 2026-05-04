@@ -553,6 +553,25 @@ wrap_load_handler! {
     }
 
     impl LoadHandler {
+        fn on_loading_state_change(
+            &self,
+            _browser: Option<&mut Browser>,
+            is_loading: ::std::os::raw::c_int,
+            _can_go_back: ::std::os::raw::c_int,
+            _can_go_forward: ::std::os::raw::c_int,
+        ) {
+            // Authoritative loading-state signal from CEF.  on_paint clears
+            // `loading_busy` on first contentful paint, but if CEF stops
+            // emitting paints (idle page after load, throttled background
+            // tab) the flag stays stuck, host_is_loading() returns true,
+            // and the embedder spins the loading anim ticker forever.
+            // Clearing here on the explicit transition guarantees the flag
+            // matches the browser's actual state.
+            if is_loading == 0 {
+                self.loading_busy.store(false, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+
         fn on_load_start(
             &self,
             browser: Option<&mut Browser>,
